@@ -1,0 +1,180 @@
+#version 430 core
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+ * Mesh Generation Shader (Compute Shader, GL 4.3+)
+ *
+ * Reads voxel data from SSBO, generates vertex/index data
+ * for visible block faces. Output is 48-byte interleaved vertices
+ * matching the terrain.vert vertex format.
+ *
+ * Vertex format (48 bytes / vertex):
+ *   pos3f (12) + normal3f (12) + texcoord2f (8) + color4f (16)
+ *
+ * Each invocation processes one block. Exposed faces emit
+ * 4 verts + 6 indices per face using atomic counters.
+ * -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Input: voxel data SSBO (one uint per block = block ID, 0 = air)
+layout(binding = 3, std430) buffer VoxelData {
+    uint blocks[];
+};
+
+uniform int  u_DataSlot;       // slot index in the voxel data SSBO
+uniform int  u_ChunkBaseX;     // chunkX * 16
+uniform int  u_ChunkBaseZ;     // chunkZ * 16
+uniform int  u_TotalSections;  // 24
+
+// Output: vertex pool (48 bytes / vertex = 12 uints / vertex)
+layout(binding = 0, std430) buffer VertexPool {
+    uint verts[];
+};
+
+// Output: index pool
+layout(binding = 1, std430) buffer IndexPool {
+    uint indices[];
+};
+
+// Draw command + counters: [0]=drawCount, [1]=vertexCount, [2]=indexCount
+// coherent required for atomicAdd to be visible across workgroups
+layout(binding = 4, std430) coherent buffer DrawBuffer {
+    uint drawHeader[];
+};
+
+const int MIN_Y = -64;
+
+const vec3 FACE_NORMALS[6] = vec3[6](
+    vec3( 0.0,  0.0,  1.0), // +Z
+    vec3( 0.0,  0.0, -1.0), // -Z
+    vec3( 1.0,  0.0,  0.0), // +X
+    vec3(-1.0,  0.0,  0.0), // -X
+    vec3( 0.0,  1.0,  0.0), // +Y
+    vec3( 0.0, -1.0,  0.0)  // -Y
+);
+
+// Face vertex offsets in local block space
+const vec3 FACE_VERTS[24] = vec3[24](
+    // +Z
+    vec3(-0.5, -0.5, 0.5), vec3(0.5, -0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(-0.5, 0.5, 0.5),
+    // -Z
+    vec3(0.5, -0.5, -0.5), vec3(-0.5, -0.5, -0.5), vec3(-0.5, 0.5, -0.5), vec3(0.5, 0.5, -0.5),
+    // +X
+    vec3(0.5, -0.5, -0.5), vec3(0.5, -0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, -0.5),
+    // -X
+    vec3(-0.5, -0.5, 0.5), vec3(-0.5, -0.5, -0.5), vec3(-0.5, 0.5, -0.5), vec3(-0.5, 0.5, 0.5),
+    // +Y
+    vec3(-0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, -0.5), vec3(-0.5, 0.5, -0.5),
+    // -Y
+    vec3(-0.5, -0.5, -0.5), vec3(0.5, -0.5, -0.5), vec3(0.5, -0.5, 0.5), vec3(-0.5, -0.5, 0.5)
+);
+
+// Color per block ID (simple hash-based coloring for debugging)
+vec4 debugColor(int blockId) {
+    uint h = uint(blockId) * 0x9E3779B9u;
+    return vec4(
+        float((h & 0xFFu)) / 255.0,
+        float(((h >> 8) & 0xFFu)) / 255.0,
+        float(((h >> 16) & 0xFFu)) / 255.0,
+        1.0
+    );
+}
+
+void main() {
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+
+    // Block position within the chunk
+    uint layerSize = 4096u;     // 16x16x16
+
+    ivec3 blockPos = ivec3(
+        int(globalId % 16u),
+        int((globalId / 256u) % 16u),
+        int((globalId / 16u) % 16u)
+    );
+    uint sectionIdx = globalId / layerSize;
+    if (int(sectionIdx) >= u_TotalSections) return;
+
+    // Read block ID
+    uint slot = uint(u_DataSlot);
+    uint dataIdx = slot * 98304u + sectionIdx * 4096u
+                 + uint(blockPos.y) * 256u + uint(blockPos.z) * 16u + uint(blockPos.x);
+    uint packed = blocks[dataIdx];
+    int blockId = int(packed & 0xFFFFu);
+    if (blockId == 0) return;
+
+    // World position of this block
+    ivec3 worldBase = ivec3(u_ChunkBaseX, sectionIdx * 16 + MIN_Y, u_ChunkBaseZ);
+
+    vec4 color = debugColor(blockId);
+    vec2 texCoord = vec2(0.0);
+
+    // Track whether any face was emitted for this block
+    bool emitted = false;
+
+    // Check 6 faces
+    for (int face = 0; face < 6; face++) {
+        // Compute neighbor position
+        ivec3 nbr = blockPos + ivec3(FACE_NORMALS[face]);
+        bool visible = false;
+
+        if (nbr.x < 0 || nbr.x > 15 || nbr.y < 0 || nbr.y > 15 || nbr.z < 0 || nbr.z > 15) {
+            // Edge of section — check neighboring section/chunk
+            // For simplicity, assume face is visible at chunk boundaries
+            visible = true;
+        } else {
+            // Check neighbor block
+            uint nbrIdx = slot * 98304u + sectionIdx * 4096u
+                        + uint(nbr.y) * 256u + uint(nbr.z) * 16u + uint(nbr.x);
+            uint nbrPacked = blocks[nbrIdx];
+            if ((nbrPacked & 0xFFFFu) == 0u) {
+                visible = true;
+            }
+        }
+
+        if (!visible) continue;
+        emitted = true;
+
+        // Allocate vertex + index space
+        uint vertStart = atomicAdd(drawHeader[1], 4u);
+        uint idxStart  = atomicAdd(drawHeader[2], 6u);
+
+        vec3 normal = FACE_NORMALS[face];
+
+        // Write 4 vertices (48 bytes each = 12 uints each)
+        for (int v = 0; v < 4; v++) {
+            vec3 localPos = FACE_VERTS[face * 4 + v];
+            vec3 worldPos = vec3(worldBase) + vec3(blockPos) + localPos;
+
+            uint vi = (vertStart + uint(v)) * 12u;
+
+            // Position (3 floats)
+            verts[vi + 0] = floatBitsToUint(worldPos.x);
+            verts[vi + 1] = floatBitsToUint(worldPos.y);
+            verts[vi + 2] = floatBitsToUint(worldPos.z);
+            verts[vi + 3] = floatBitsToUint(normal.x);
+            verts[vi + 4] = floatBitsToUint(normal.y);
+            verts[vi + 5] = floatBitsToUint(normal.z);
+            verts[vi + 6] = floatBitsToUint(texCoord.x);
+            verts[vi + 7] = floatBitsToUint(texCoord.y);
+            verts[vi + 8] = floatBitsToUint(color.r);
+            verts[vi + 9] = floatBitsToUint(color.g);
+            verts[vi + 10] = floatBitsToUint(color.b);
+            verts[vi + 11] = floatBitsToUint(color.a);
+        }
+
+        // Write 6 indices (2 triangles)
+        uint ii = idxStart;
+        indices[ii + 0] = vertStart;
+        indices[ii + 1] = vertStart + 1;
+        indices[ii + 2] = vertStart + 2;
+        indices[ii + 3] = vertStart;
+        indices[ii + 4] = vertStart + 2;
+        indices[ii + 5] = vertStart + 3;
+    }
+
+    // Increment draw counter if at least one face was emitted
+    if (emitted) {
+        atomicAdd(drawHeader[0], 1u);
+    }
+}

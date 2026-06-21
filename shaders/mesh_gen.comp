@@ -1,0 +1,144 @@
+#version 430 core
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+ * Mesh Generation Shader (Compute Shader, GL 4.3+)
+ *
+ * GPU-driven mesh generation: reads voxel data and generates
+ * vertex/index data for visible block faces.
+ *
+ * Output:
+ *   VertexPool  - SSBO containing vertex attributes (interleaved)
+ *   IndexPool   - SSBO containing triangle indices
+ *   IndirectBuffer - SSBO for indirect draw commands
+ * -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Input: voxel data texture array (16x16x16 blocks per section)
+layout(binding = 0) uniform sampler2DArray u_VoxelData;
+
+// Output buffers
+layout(binding = 0, std430) buffer VertexPool {
+    vec4 vertices[];
+};
+
+layout(binding = 1, std430) buffer IndexPool {
+    uint indices[];
+};
+
+layout(binding = 2, std430) buffer IndirectBuffer {
+    uint drawCommands[];
+};
+
+// Uniforms
+uniform ivec3 u_ChunkOffset;
+uniform int u_TotalSections;
+
+// Block face definitions
+const vec3[6] FACE_NORMALS = vec3[6](
+    vec3(0.0, 0.0, -1.0), vec3(0.0, 0.0, 1.0),
+    vec3(-1.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0),
+    vec3(0.0, -1.0, 0.0), vec3(0.0, 1.0, 0.0)
+);
+
+struct Vertex {
+    vec3 position;
+    vec3 normal;
+    vec2 texCoord;
+    vec4 color;
+};
+
+// Per-thread shared vertex cache
+shared Vertex sharedVerts[64];
+
+uint packBlockData(int blockId, int light, int face) {
+    return uint(blockId) | (uint(light) << 12) | (uint(face) << 20);
+}
+
+void generateFace(ivec3 blockPos, int blockId, int faceIndex, uint threadId) {
+    ivec3 faceOff = ivec3(FACE_NORMALS[faceIndex]);
+    ivec3 neighborPos = blockPos + faceOff;
+
+    // Check if neighbor is air (face is visible)
+    vec4 neighborData = texelFetch(u_VoxelData, ivec3(
+        clamp(neighborPos.x, 0, 15),
+        clamp(neighborPos.y, 0, 15),
+        clamp(neighborPos.z, 0, 15)
+    ), 0);
+
+    int neighborId = int(neighborData.r * 255.0);
+    if (neighborId != 0) return; // Not visible
+
+    vec3 worldPos = vec3(u_ChunkOffset) + vec3(blockPos) + vec3(0.5);
+    vec3 normal = FACE_NORMALS[faceIndex];
+
+    // Generate 4 vertices for the quad
+    int vertBase = int(threadId) * 4;
+    int idxBase = int(threadId) * 6;
+
+    vec3 tangent = abs(normal.x) > 0.5 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 bitangent = cross(normal, tangent);
+
+    for (int i = 0; i < 4; i++) {
+        float u = float(i == 1 || i == 2);
+        float v = float(i == 2 || i == 3);
+        vec3 offset = (u - 0.5) * tangent * 1.0 + (v - 0.5) * bitangent * 1.0;
+
+        Vertex vert;
+        vert.position = worldPos + normal * 0.5 + offset;
+        vert.normal = normal;
+        vert.texCoord = vec2(u, v);
+        vert.color = vec4(1.0);
+
+        vec4 packed = vec4(vert.position, uintBitsToFloat(packBlockData(blockId, 0, faceIndex)));
+        vertices[vertBase + i] = packed;
+    }
+
+    // 2 triangles: 0-1-2, 0-2-3
+    uint baseIdx = uint(vertBase);
+    indices[idxBase + 0] = baseIdx;
+    indices[idxBase + 1] = baseIdx + 1;
+    indices[idxBase + 2] = baseIdx + 2;
+    indices[idxBase + 3] = baseIdx;
+    indices[idxBase + 4] = baseIdx + 2;
+    indices[idxBase + 5] = baseIdx + 3;
+}
+
+void main() {
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+
+    // Each invocation processes one block
+    ivec3 blockPos = ivec3(
+        int(globalId) % 16,
+        (int(globalId) / 16) % 16,
+        (int(globalId) / 256) % 16
+    );
+
+    int sectionIdx = int(globalId) / 4096;
+    if (sectionIdx >= u_TotalSections) return;
+
+    // Read block ID
+    vec4 blockData = texelFetch(u_VoxelData, ivec3(blockPos.x, blockPos.y + sectionIdx * 16, blockPos.z), 0);
+    int blockId = int(blockData.r * 255.0);
+    if (blockId == 0) return;
+
+    // Generate faces
+    int faceCount = 0;
+    for (int f = 0; f < 6; f++) {
+        generateFace(blockPos, blockId, f, globalId * 6 + f);
+        faceCount++;
+    }
+
+    // Write indirect draw command
+    if (localId == 0) {
+        uint cmdBase = globalId / 64;
+        drawCommands[cmdBase * 5 + 0] = uint(faceCount * 6); // indexCount
+        drawCommands[cmdBase * 5 + 1] = 1u; // instanceCount
+        drawCommands[cmdBase * 5 + 2] = 0u; // firstIndex
+        drawCommands[cmdBase * 5 + 3] = 0u; // baseVertex
+        drawCommands[cmdBase * 5 + 4] = 0u; // firstInstance
+    }
+
+    memoryBarrierBuffer();
+}

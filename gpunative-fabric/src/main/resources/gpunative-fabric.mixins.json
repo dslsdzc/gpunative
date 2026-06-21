@@ -1,0 +1,13 @@
+{
+    "required": true,
+    "minVersion": "0.8",
+    "package": "com.dslsdzc.gpunative.fabric.mixin",
+    "compatibilityLevel": "JAVA_17",
+    "client": [
+        "WorldRendererMixin",
+        "ClientChunkCacheMixin"
+    ],
+    "injectors": {
+        "defaultRequire": 1
+    }
+}

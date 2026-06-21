@@ -1,0 +1,26 @@
+[mods]
+    [mods.gpunative]
+        displayName = "GPU Native"
+        version = "${version}"
+        description = "A GPU-driven rendering pipeline mod for Minecraft"
+        authors = ["gpunative"]
+        license = "MIT"
+        logoFile = "gpunative.png"
+        [[mods.gpunative.dependencies]]
+            modId = "minecraft"
+            type = "required"
+            versionRange = "[1.20.1]"
+            ordering = "NONE"
+            side = "CLIENT"
+        [[mods.gpunative.dependencies]]
+            modId = "neoforge"
+            mandatory = true
+            versionRange = "[20.4.0-beta,21.0.0-beta)"
+            ordering = "NONE"
+            side = "BOTH"
+        [[mods.gpunative.conflicts]]
+            modId = "optifine"
+            versionRange = "*"
+
+[neoforge.mixin]
+    configs = ["gpunative-neoforge.mixins.json"]

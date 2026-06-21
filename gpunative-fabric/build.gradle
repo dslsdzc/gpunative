@@ -1,0 +1,32 @@
+plugins {
+    id "fabric-loom"
+}
+
+version = modVersion
+base {
+    archivesName = "gpunative-fabric"
+}
+
+loom {
+    mixin {
+        defaultRefmapName.set("gpunative-fabric.refmap.json")
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraftVersion}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${fabricLoaderVersion}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabricApiVersion}"
+
+    implementation project(":gpunative-core")
+}
+
+processResources {
+    inputs.property "modVersion", modVersion
+    inputs.property "minecraftVersion", minecraftVersion
+
+    filesMatching("fabric.mod.json") {
+        expand version: modVersion, minecraftVersion: minecraftVersion
+    }
+}

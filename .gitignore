@@ -1,0 +1,26 @@
+## Gradle
+.gradle/
+build/
+*.class
+out/
+
+## IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+## Run artifacts
+**/run/
+
+## Logs & profiling
+*.log
+*.zst
+heaptrack.*
+
+## Claude
+.claude/
+
+## OS
+.DS_Store
+Thumbs.db

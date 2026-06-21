@@ -1,0 +1,24 @@
+plugins {
+    id "java-library"
+}
+
+version = modVersion
+base {
+    archivesName = "gpunative-core"
+}
+
+dependencies {
+    // LWJGL 3 is provided by Minecraft at runtime - no compile dependency needed
+    compileOnly "org.lwjgl:lwjgl:3.3.1"
+    compileOnly "org.lwjgl:lwjgl-opengl:3.3.1"
+}
+
+jar {
+    manifest {
+        attributes(
+            "Specification-Title": "GPU Native Core",
+            "Specification-Vendor": "gpunative",
+            "Specification-Version": project.version,
+        )
+    }
+}

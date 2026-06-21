@@ -1,0 +1,93 @@
+#version 430 core
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+ * GPU Culling Shader (Compute Shader, GL 4.3+)
+ *
+ * Performs frustum culling and distance-based LOD selection.
+ * Writes counts and indirect draw arguments for visible objects.
+ * -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Input: bounding boxes of all renderable objects
+layout(binding = 0, std430) buffer CullInput {
+    vec4 bboxData[];
+};
+
+// Output: indirect draw commands for visible objects only
+layout(binding = 1, std430) buffer IndirectBuffer {
+    uint drawCommands[];
+};
+
+// Camera data
+uniform vec3 u_CameraPos;
+uniform vec4 u_FrustumPlanes[6];
+uniform float u_MaxRenderDistance;
+uniform uint u_TotalObjects;
+
+// Shared memory: per-workgroup visible count
+shared uint visibleCount;
+shared uint visibleIndices[64];
+
+bool frustumTest(vec3 center, vec3 halfExtents) {
+    for (int i = 0; i < 6; i++) {
+        vec4 plane = u_FrustumPlanes[i];
+        float d = dot(center, plane.xyz) + plane.w;
+        float r = dot(halfExtents, abs(plane.xyz));
+        if (d + r < 0.0) return false;
+    }
+    return true;
+}
+
+void main() {
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+
+    if (localId == 0) {
+        visibleCount = 0;
+    }
+    barrier();
+
+    bool visible = false;
+
+    if (globalId < u_TotalObjects) {
+        vec3 bboxMin = bboxData[globalId * 2].xyz;
+        vec3 bboxMax = bboxData[globalId * 2 + 1].xyz;
+
+        vec3 center = (bboxMin + bboxMax) * 0.5;
+        vec3 halfExt = (bboxMax - bboxMin) * 0.5;
+
+        if (frustumTest(center, halfExt)) {
+            float dist = length(center - u_CameraPos);
+            if (dist <= u_MaxRenderDistance) {
+                visible = true;
+            }
+        }
+    }
+    barrier();
+
+    // Compact visible objects into output buffer
+    if (visible) {
+        uint idx = atomicAdd(visibleCount, 1);
+        visibleIndices[localId] = globalId;
+    }
+    barrier();
+
+    if (localId == 0 && visibleCount > 0) {
+        uint base = atomicAdd(drawCommands[0], visibleCount);
+
+        for (uint i = 0; i < visibleCount; i++) {
+            uint objIdx = visibleIndices[i];
+            uint cmdOffset = 5 + (base + i) * 5;
+
+            // Copy original draw command for this object
+            drawCommands[cmdOffset + 0] = drawCommands[objIdx * 5 + 1]; // count
+            drawCommands[cmdOffset + 1] = 1u; // instanceCount
+            drawCommands[cmdOffset + 2] = drawCommands[objIdx * 5 + 2]; // firstIndex
+            drawCommands[cmdOffset + 3] = drawCommands[objIdx * 5 + 3]; // baseVertex
+            drawCommands[cmdOffset + 4] = 0u; // firstInstance
+        }
+    }
+
+    memoryBarrierBuffer();
+}

@@ -1,0 +1,36 @@
+{
+    "schemaVersion": 1,
+    "id": "gpunative",
+    "version": "${version}",
+    "name": "GPU Native",
+    "description": "A GPU-driven rendering pipeline mod for Minecraft",
+    "authors": ["gpunative"],
+    "contact": {},
+    "license": "MIT",
+    "icon": "assets/gpunative/icon.png",
+    "environment": "client",
+    "entrypoints": {
+        "main": ["com.dslsdzc.gpunative.fabric.GpuNativeFabric"],
+        "client": ["com.dslsdzc.gpunative.fabric.GpuNativeFabric"]
+    },
+    "mixins": ["gpunative-fabric.mixins.json"],
+    "depends": {
+        "fabricloader": ">=0.15.0",
+        "fabric-api": ">=0.91.0",
+        "minecraft": ">=1.20.1",
+        "java": ">=17"
+    },
+    "conflicts": {
+        "sodium": "*",
+        "optifabric": "*",
+        "canvas": "*",
+        "vulkanmod": "*",
+        "iris": "*"
+    },
+    "custom": {
+        "modmenu": {
+            "badges": ["library"],
+            "parent": "gpunative"
+        }
+    }
+}

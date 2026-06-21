@@ -1,0 +1,29 @@
+plugins {
+    id "net.neoforged.gradle.userdev" version "7.0.66"
+}
+
+version = modVersion
+base {
+    archivesName = "gpunative-neoforge"
+}
+
+userDev {
+    runs {
+        client {}
+        server {}
+    }
+}
+
+dependencies {
+    implementation "net.neoforged:neoforge:${neoforgeVersion}"
+    implementation project(":gpunative-core")
+}
+
+processResources {
+    inputs.property "modVersion", modVersion
+    inputs.property "minecraftVersion", minecraftVersion
+
+    filesMatching("META-INF/neoforge.mods.toml") {
+        expand version: modVersion, minecraftVersion: minecraftVersion
+    }
+}

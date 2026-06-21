@@ -1,0 +1,30 @@
+plugins {
+    id "fabric-loom" version "${loomVersion}" apply false
+}
+
+subprojects {
+    apply plugin: "java"
+
+    java {
+        toolchain {
+            languageVersion.set(JavaLanguageVersion.of(modJavaVersion))
+        }
+        withSourcesJar()
+    }
+
+    repositories {
+        mavenCentral()
+        maven { url "https://maven.fabricmc.net/" }
+        maven { url "https://maven.neoforged.net/releases/" }
+        maven { url "https://repo.spongepowered.org/maven/" }
+    }
+
+    dependencies {
+        compileOnly "org.jetbrains:annotations:24.0.1"
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = "UTF-8"
+        options.release.set(Integer.parseInt(modJavaVersion.toString()))
+    }
+}
